@@ -1,5 +1,16 @@
 {
-  "buildCommand": "",
-  "outputDirectory": "SE-RAG/SE-with-chatbot/SE-main/build/web"
+  "builds": [
+    {
+      "src": "SE-RAG/SE-with-chatbot/SE-main/build/web/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "SE-RAG/SE-with-chatbot/SE-main/build/web/index.html"
+    }
+  ]
 }
+
 
