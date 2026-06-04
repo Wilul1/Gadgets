@@ -1,0 +1,5 @@
+{
+  "buildCommand": "cd SE-RAG/SE-with-chatbot/SE-main && flutter build web",
+  "outputDirectory": "SE-RAG/SE-with-chatbot/SE-main/build/web",
+  "framework": "flutter"
+}
