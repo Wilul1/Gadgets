@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "647745759998",
+    "project_id": "tech-hub-master",
+    "storage_bucket": "tech-hub-master.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:647745759998:android:b38325b6a71916e66cd3af",
+        "android_client_info": {
+          "package_name": "com.example.tech_hub_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC8e7g5gXAOag2lJlMTvSLK3OSaZcGz82E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

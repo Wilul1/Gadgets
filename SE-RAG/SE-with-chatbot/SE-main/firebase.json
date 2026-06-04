@@ -1,0 +1,6 @@
+{"flutter":{"platforms":{"android":{"default":{"projectId":"tech-hub-master","appId":"1:647745759998:android:b38325b6a71916e66cd3af","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"tech-hub-master","configurations":{"android":"1:647745759998:android:b38325b6a71916e66cd3af","ios":"1:647745759998:ios:d418c4dda3e652a46cd3af","macos":"1:647745759998:ios:d418c4dda3e652a46cd3af","web":"1:647745759998:web:8b75a60c064013676cd3af","windows":"1:647745759998:web:3362c530acb2dc2b6cd3af"}}}}},
+ "firestore": {
+		"rules": "firestore.rules",
+		"indexes": "firestore.indexes.json"
+	}
+}

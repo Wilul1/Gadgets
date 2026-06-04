@@ -1,0 +1,128 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null &&
+        (request.auth.token.admin == true ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin"));
+    }
+
+    match /users/{userId} {
+      allow read, write: if request.auth != null && (request.auth.uid == userId || isAdmin());
+    }
+
+    match /adminData/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /products/{productId} {
+      allow read: if true;
+
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll(['name','price','description','brand','imageUrl'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.price is number
+        && request.resource.data.price >= 0
+        && request.resource.data.description is string
+        && request.resource.data.brand is string
+        && request.resource.data.imageUrl is string;
+
+      allow update: if isAdmin()
+        && (
+          (!('name' in request.resource.data) || (request.resource.data.name is string && request.resource.data.name.size() > 0))
+          &&
+          (!('price' in request.resource.data) || (request.resource.data.price is number && request.resource.data.price >= 0))
+          &&
+          (!('description' in request.resource.data) || (request.resource.data.description is string))
+          &&
+          (!('brand' in request.resource.data) || (request.resource.data.brand is string))
+          &&
+          (!('imageUrl' in request.resource.data) || (request.resource.data.imageUrl is string))
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    match /orders/{orderId} {
+      // Owners and admins can read an order
+      allow read: if request.auth != null && (resource.data.userId == request.auth.uid || isAdmin());
+
+      // Create: authenticated user can create an order for themselves
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.keys().hasAll(['userId','items','subtotal','total','status','createdAt'])
+        && request.resource.data.items is list
+        && request.resource.data.subtotal is number
+        && request.resource.data.total is number
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt is timestamp;
+
+      // Update:
+      // - Admins can update anything
+      // - Owner can:
+      //   * cancel pending order
+      //   * confirm delivery when shipped/delivered (buyerConfirmed=true, server sets buyerConfirmedAt)
+      //   * update other fields without changing status
+      allow update: if isAdmin()
+        || (
+          request.auth != null
+          && request.auth.uid == resource.data.userId
+          && (
+            (resource.data.status == 'pending' && request.resource.data.status == 'cancelled')
+            ||
+            (
+              (resource.data.status == 'shipped' || resource.data.status == 'delivered')
+              && request.resource.data.buyerConfirmed == true
+              && request.resource.data.keys().hasOnly(resource.data.keys().union(['buyerConfirmed','buyerConfirmedAt','updatedAt','notes']))
+            )
+            ||
+            (!('status' in request.resource.data) || request.resource.data.status == resource.data.status)
+          )
+        );
+
+      // Delete: Admins or owner if pending
+      allow delete: if isAdmin()
+        || (request.auth != null && request.auth.uid == resource.data.userId && resource.data.status == 'pending');
+    }
+
+    match /cart/{cartItemId} {
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+
+    match /riderAssignments/{assignmentId} {
+      // Admins can read all assignments
+      allow read: if isAdmin();
+      
+      // Riders can read only their own assignments
+      allow read: if request.auth != null && resource.data.riderId == request.auth.uid;
+
+      // Admins can create assignments for any order/rider
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll(['orderId','riderId','orderOwnerUserId','status','assignedAt'])
+        && request.resource.data.status == 'assigned';
+
+      // Update:
+      // - Admins can update any assignment
+      // - Riders can only update their own assignments and only specific fields
+      //   Riders CANNOT change: orderId, riderId, orderOwnerUserId
+      allow update: if isAdmin()
+        || (
+          request.auth != null
+          && request.auth.uid == resource.data.riderId
+          && !('orderId' in request.resource.data)
+          && !('riderId' in request.resource.data)
+          && !('orderOwnerUserId' in request.resource.data)
+          && request.resource.data.keys().hasOnly(resource.data.keys().union(['status','acceptedAt','pickedUpAt','deliveredAt','notes','earnings','updatedAt']))
+        );
+
+      // Delete:
+      // - Admins can delete any assignment
+      allow delete: if isAdmin();
+    }
+  }
+}

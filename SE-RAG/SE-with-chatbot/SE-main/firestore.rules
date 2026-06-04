@@ -1,0 +1,303 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null &&
+        (request.auth.token.admin == true ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          (
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin" ||
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true
+          )));
+    }
+
+    function isRider() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "rider";
+    }
+
+    // Rider auto-reassign after decline: limited order fields only
+    function isRiderReassignOrderUpdate() {
+      return isRider() &&
+        request.resource.data.diff(resource.data).changedKeys()
+          .hasOnly([
+            'assignedRiderId',
+            'assignedRiderName',
+            'riderAssignmentId',
+            'riderAssignmentPending',
+            'declinedRiderIds',
+            'updatedAt'
+          ]);
+    }
+
+    // Rider updates delivery progress on the order (status sync for customer tracking)
+    function isRiderDeliveryStatusUpdate() {
+      return isRider() &&
+        request.resource.data.diff(resource.data).changedKeys()
+          .hasOnly(['status', 'riderDeliveryStatus', 'updatedAt']);
+    }
+
+    function isValidPrice(price) {
+      return price is int || price is float;
+    }
+
+    // Customer checkout/cancel: only stock fields may change
+    function isStockOnlyUpdate() {
+      return request.auth != null &&
+        request.resource.data.diff(resource.data).changedKeys()
+          .hasOnly(['stockQuantity', 'isAvailable', 'updatedAt']);
+    }
+
+    function isStockDecrease() {
+      return isStockOnlyUpdate() &&
+        request.resource.data.stockQuantity is int &&
+        request.resource.data.stockQuantity >= 0 &&
+        ('stockQuantity' in resource.data) &&
+        request.resource.data.stockQuantity < resource.data.stockQuantity;
+    }
+
+    function isStockRestore() {
+      return isStockOnlyUpdate() &&
+        request.resource.data.stockQuantity is int &&
+        request.resource.data.stockQuantity >= 0 &&
+        ('stockQuantity' in resource.data) &&
+        request.resource.data.stockQuantity > resource.data.stockQuantity;
+    }
+
+    match /users/{userId} {
+      // Riders may read other rider profiles (for random reassignment)
+      allow read: if request.auth != null && (
+        request.auth.uid == userId ||
+        isAdmin() ||
+        (isRider() && resource.data.role == "rider")
+      );
+      allow write: if request.auth != null && (request.auth.uid == userId || isAdmin());
+    }
+
+    match /adminData/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /products/{productId} {
+      allow read: if true;
+
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll(['name','price','description','brand','imageUrl'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && isValidPrice(request.resource.data.price)
+        && request.resource.data.price >= 0
+        && request.resource.data.description is string
+        && request.resource.data.brand is string
+        && request.resource.data.imageUrl is string
+        && (!('stockQuantity' in request.resource.data) || request.resource.data.stockQuantity is int)
+        && (!('isAvailable' in request.resource.data) || request.resource.data.isAvailable is bool);
+
+      allow update: if isAdmin()
+        || isStockDecrease()
+        || isStockRestore();
+
+      allow delete: if isAdmin();
+    }
+
+    match /promo_codes/{promoId} {
+      // Promo codes must be readable for checkout validation by authenticated users.
+      // Admins can fully manage promo documents.
+      allow read: if request.auth != null;
+
+      allow create, update, delete: if isAdmin()
+        && request.resource.data.keys().hasAll(['type', 'value'])
+        && request.resource.data.type is string
+        && request.resource.data.value is number
+        && (!('active' in request.resource.data) || request.resource.data.active is bool)
+        && (!('minSubtotal' in request.resource.data) || request.resource.data.minSubtotal is number)
+        && (!('maxUses' in request.resource.data) || request.resource.data.maxUses is int)
+        && (!('perUserLimit' in request.resource.data) || request.resource.data.perUserLimit is int)
+        && (!('allowedCities' in request.resource.data) || request.resource.data.allowedCities is list)
+        && (!('expiresAt' in request.resource.data) || request.resource.data.expiresAt is timestamp);
+    }
+
+    match /inventory/{productId} {
+      allow read: if true;
+
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll(['productId','productName','stockQuantity'])
+        && request.resource.data.productId is string
+        && request.resource.data.productName is string
+        && request.resource.data.stockQuantity is int
+        && request.resource.data.stockQuantity >= 0;
+
+      allow update: if isAdmin()
+        || (
+          request.auth != null &&
+          request.resource.data.diff(resource.data).changedKeys()
+            .hasOnly(['stockQuantity', 'isAvailable', 'status', 'updatedAt']) &&
+          request.resource.data.stockQuantity is int &&
+          request.resource.data.stockQuantity >= 0
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    match /orders/{orderId} {
+      // Owners, admins, and riders (for delivery / auto-reassign) can read orders
+      allow read: if request.auth != null && (
+        resource.data.userId == request.auth.uid ||
+        isAdmin() ||
+        isRider()
+      );
+
+      // Create: authenticated user can create an order for themselves and initial status must be 'pending'
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.keys().hasAll(['userId','items','subtotal','total','status','createdAt'])
+        && request.resource.data.items is list
+        && request.resource.data.subtotal is number
+        && request.resource.data.total is number
+        && request.resource.data.status == 'pending'
+        && request.resource.data.createdAt is timestamp;
+
+      // Update:
+      // - Admins can update anything (confirm/process/ship/deliver/cancel)
+      // - Order owner can:
+      //    * cancel a pending order (set status == 'cancelled')
+      //    * confirm delivery (set buyerConfirmed == true) only when current stored status is 'shipped' or 'delivered'
+      //      and buyerConfirmedAt must equal server time (request.time)
+      //    * update non-status fields while keeping status unchanged (notes, updatedAt)
+      allow update: if isAdmin()
+        || isRiderReassignOrderUpdate()
+        || isRiderDeliveryStatusUpdate()
+        || (
+          request.auth != null
+          && request.auth.uid == resource.data.userId
+          && (
+            // owner cancelling a pending order
+            (resource.data.status == 'pending' && request.resource.data.status == 'cancelled')
+            ||
+            // owner confirming delivery: after rider delivery (order status or riderDeliveryStatus)
+            (
+              (
+                resource.data.status == 'shipped' ||
+                resource.data.status == 'delivered' ||
+                resource.data.riderDeliveryStatus == 'delivered'
+              )
+              && request.resource.data.buyerConfirmed == true
+              // allow only these keys to change (plus optional notes/updatedAt)
+              // buyerConfirmedAt will be populated server-side as a server timestamp
+              && request.resource.data.keys().hasOnly(resource.data.keys().union(['buyerConfirmed','buyerConfirmedAt','updatedAt','notes']))
+            )
+            ||
+            // owner may update non-status fields while keeping status unchanged
+            (
+              (!('status' in request.resource.data) || request.resource.data.status == resource.data.status)
+            )
+            ||
+            // owner cancelling: restore stock flags allowed with status cancelled
+            (
+              resource.data.status == 'pending'
+              && request.resource.data.status == 'cancelled'
+              && request.resource.data.diff(resource.data).changedKeys()
+                .hasOnly(['status', 'updatedAt', 'notes', 'stockRestored'])
+            )
+          )
+        );
+
+      // Delete:
+      // - Admins can delete any order
+      // - Owner may delete their own pending order
+      allow delete: if isAdmin()
+        || (request.auth != null && request.auth.uid == resource.data.userId && resource.data.status == 'pending');
+    }
+
+    match /order_feedback/{orderId} {
+      allow read: if request.auth != null && (
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/orders/$(orderId)) &&
+         get(/databases/$(database)/documents/orders/$(orderId)).data.userId == request.auth.uid)
+      );
+
+      allow create, update: if request.auth != null && (
+        isAdmin() ||
+        (request.resource.data.userId == request.auth.uid &&
+         exists(/databases/$(database)/documents/orders/$(orderId)) &&
+         get(/databases/$(database)/documents/orders/$(orderId)).data.userId == request.auth.uid)
+      );
+
+      allow delete: if isAdmin() || (
+        request.auth != null &&
+        exists(/databases/$(database)/documents/orders/$(orderId)) &&
+        get(/databases/$(database)/documents/orders/$(orderId)).data.userId == request.auth.uid
+      );
+    }
+
+    match /cart/{cartItemId} {
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow update, delete: if request.auth != null && resource.data.userId == request.auth.uid;
+    }
+
+    match /riderAssignments/{assignmentId} {
+      // Admins can read all assignments
+      allow read: if isAdmin();
+      
+      // Riders can read their own assignments
+      allow read: if request.auth != null && resource.data.riderId == request.auth.uid;
+
+      // Riders can read other assignments on the same order (declined/assigned) for auto-reassign
+      allow read: if isRider();
+
+      // Order owners can read the assignment for their order to see rider tracking info
+      allow read: if request.auth != null && resource.data.orderOwnerUserId == request.auth.uid;
+      
+      // Allow listing/querying assignments by orderOwnerUserId (for buyer tracking)
+      allow list: if request.auth != null && request.query.limit <= 100;
+
+      // Admins and auto-assign on confirm; riders may create reassignment for another rider after decline
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll(['orderId','riderId','orderOwnerUserId','status','assignedAt'])
+        && request.resource.data.status == 'assigned'
+        && request.resource.data.orderId is string
+        && request.resource.data.riderId is string
+        && request.resource.data.orderOwnerUserId is string
+        || (
+          isRider()
+          && request.resource.data.keys().hasAll(['orderId','riderId','orderOwnerUserId','status','assignedAt'])
+          && request.resource.data.status == 'assigned'
+          && request.resource.data.orderId is string
+          && request.resource.data.riderId is string
+          && request.resource.data.riderId != request.auth.uid
+          && request.resource.data.orderOwnerUserId is string
+        );
+
+      // Update:
+      // - Admins can update any assignment
+      // - Riders can only update their own assignments and only certain fields (status, acceptedAt, pickedUpAt, deliveredAt, notes, earnings)
+      //   Riders CANNOT change: orderId, riderId, orderOwnerUserId
+      // Ensure riders can update only their own assignment and only specific mutable fields.
+      allow update: if isAdmin()
+        || (
+          request.auth != null
+          && request.auth.uid == resource.data.riderId
+          && request.resource.data.diff(resource.data).changedKeys().hasOnly([
+            'status',
+            'acceptedAt',
+            'pickedUpAt',
+            'inTransitAt',
+            'deliveredAt',
+            'notes',
+            'earnings',
+            'riderName',
+            'riderEmail',
+            'updatedAt',
+            'declinedAt'
+          ])
+        );
+
+      // Delete:
+      // - Admins can delete any assignment
+      allow delete: if isAdmin();
+    }
+  }
+}
